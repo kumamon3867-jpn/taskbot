@@ -4,7 +4,6 @@ const { GoogleGenAI } = require('@google/genai');
 const {
   joinVoiceChannel,
   EndBehaviorType,
-  getVoiceConnection,
 } = require('@discordjs/voice');
 const prism = require('prism-media');
 const ffmpegStatic = require('ffmpeg-static');
@@ -37,7 +36,7 @@ const TASK_PROMPT = `この音声を文字起こしし、タスク情報を抽�
 期限が言及されていなければdeadlineはnull、優先度は推定してください。`;
 
 // 録音状態を管理
-const recordings = new Map(); // guildId -> { pcmPath, connection, userId, channel }
+const recordings = new Map();
 
 client.once(Events.ClientReady, () => {
   console.log(`Logged in as ${client.user.tag}`);
@@ -80,6 +79,11 @@ client.on(Events.MessageCreate, async (message) => {
         frameSize: 960,
       });
 
+      // デバッグ: 音声パケット受信を可視化
+      opusStream.on('data', (chunk) => {
+        console.log(`Opus chunk: ${chunk.length} bytes`);
+      });
+
       opusStream.pipe(decoder).pipe(pcmStream);
 
       recordings.set(message.guild.id, {
@@ -113,14 +117,19 @@ client.on(Events.MessageCreate, async (message) => {
     const replyMsg = await message.reply('⏳ 録音停止 → 変換 → 文字起こし中...');
 
     try {
-      // 録音停止
-      rec.opusStream.destroy();
-      rec.pcmStream.end();
+      // 1. Opusストリームを正常終了（push(null)で終端を通知）
+      rec.opusStream.push(null);
+
+      // 2. PCMファイルの書き込み完了を待つ
+      await new Promise(resolve => {
+        rec.pcmStream.on('close', resolve);
+        rec.pcmStream.on('finish', resolve);
+        setTimeout(resolve, 3000); // 念のためのタイムアウト
+      });
+
+      // 3. ボイス切断
       rec.connection.destroy();
       recordings.delete(message.guild.id);
-
-      // PCMが書き込み完了するまで待つ
-      await new Promise(resolve => rec.pcmStream.on('close', resolve));
 
       const pcmSize = fs.statSync(rec.pcmPath).size;
       console.log('PCMサイズ:', pcmSize);
@@ -130,7 +139,7 @@ client.on(Events.MessageCreate, async (message) => {
         return replyMsg.edit('❌ 録音された音声がほぼ無音でした。マイクを確認してください');
       }
 
-      // PCM → MP3 変換 (ffmpeg)
+      // PCM → MP3 変換
       const mp3Path = rec.pcmPath.replace('.pcm', '.mp3');
       await new Promise((resolve, reject) => {
         const ff = spawn(ffmpegStatic, [
