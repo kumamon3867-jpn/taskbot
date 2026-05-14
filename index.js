@@ -33,9 +33,12 @@ client.once(Events.ClientReady, () => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || message.content !== '!task') return;
 
-  if (!message.member.voice.channel) {
-    return message.reply('ボイスチャンネルに入ってから !task を実行してください');
-  }
+const voiceChannel = message.member.voice.channel;
+if (!voiceChannel) {
+  return message.reply('ボイスチャンネルに入ってから !task を実行してください');
+}
+
+console.log('Voice channel:', voiceChannel.name);
 
   const replyMsg = await message.reply('🎙️ 15秒間録音します...タスクを話してください！');
 
