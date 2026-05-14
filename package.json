@@ -1,0 +1,13 @@
+{
+  "name": "taskbot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.15.0",
+    "@google/genai": "^1.0.0",
+    "dotenv": "^16.4.0"
+  }
+}
