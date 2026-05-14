@@ -4,6 +4,8 @@ const { GoogleGenAI } = require('@google/genai');
 const {
   joinVoiceChannel,
   EndBehaviorType,
+  VoiceConnectionStatus,
+  entersState,
 } = require('@discordjs/voice');
 const prism = require('prism-media');
 const ffmpegStatic = require('ffmpeg-static');
@@ -35,7 +37,6 @@ const TASK_PROMPT = `この音声を文字起こしし、タスク情報を抽�
 
 期限が言及されていなければdeadlineはnull、優先度は推定してください。`;
 
-// 録音状態を管理
 const recordings = new Map();
 
 client.once(Events.ClientReady, () => {
@@ -57,17 +58,24 @@ client.on(Events.MessageCreate, async (message) => {
     }
 
     try {
+      // 1. ボイス接続
       const connection = joinVoiceChannel({
         channelId: voiceChannel.id,
         guildId: voiceChannel.guild.id,
         adapterCreator: voiceChannel.guild.voiceAdapterCreator,
         selfDeaf: false,
-        selfMute: true,
+        selfMute: false,  // ← 重要: trueだと音声受信できないバグあり
       });
 
+      // 2. 接続完了を待つ（これ重要！）
+      await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+      console.log('ボイス接続完了');
+
+      // 3. ファイル準備
       const pcmPath = path.join('/tmp', `rec_${Date.now()}.pcm`);
       const pcmStream = fs.createWriteStream(pcmPath);
 
+      // 4. 音声受信開始
       const receiver = connection.receiver;
       const opusStream = receiver.subscribe(message.author.id, {
         end: { behavior: EndBehaviorType.Manual },
@@ -79,12 +87,23 @@ client.on(Events.MessageCreate, async (message) => {
         frameSize: 960,
       });
 
-      // デバッグ: 音声パケット受信を可視化
+      let chunkCount = 0;
       opusStream.on('data', (chunk) => {
-        console.log(`Opus chunk: ${chunk.length} bytes`);
+        chunkCount++;
+        if (chunkCount % 50 === 1) {
+          console.log(`Opus chunk #${chunkCount}: ${chunk.length} bytes`);
+        }
       });
 
+      opusStream.on('error', (e) => console.error('opusStream error:', e));
+      decoder.on('error', (e) => console.error('decoder error:', e));
+      pcmStream.on('error', (e) => console.error('pcmStream error:', e));
+
       opusStream.pipe(decoder).pipe(pcmStream);
+
+      // speaking イベントで誰が話してるか可視化
+      receiver.speaking.on('start', (uid) => console.log(`発話開始: ${uid}`));
+      receiver.speaking.on('end', (uid) => console.log(`発話終了: ${uid}`));
 
       recordings.set(message.guild.id, {
         pcmPath,
@@ -95,7 +114,7 @@ client.on(Events.MessageCreate, async (message) => {
         pcmStream,
       });
 
-      console.log(`録音開始: ${voiceChannel.name}, user=${message.author.username}`);
+      console.log(`録音開始: ${voiceChannel.name}, user=${message.author.username}, userId=${message.author.id}`);
       await message.reply('🔴 録音中... 話し終わったら `!stop` を送ってください');
     } catch (err) {
       console.error('録音開始エラー:', err);
@@ -117,17 +136,14 @@ client.on(Events.MessageCreate, async (message) => {
     const replyMsg = await message.reply('⏳ 録音停止 → 変換 → 文字起こし中...');
 
     try {
-      // 1. Opusストリームを正常終了（push(null)で終端を通知）
       rec.opusStream.push(null);
 
-      // 2. PCMファイルの書き込み完了を待つ
       await new Promise(resolve => {
         rec.pcmStream.on('close', resolve);
         rec.pcmStream.on('finish', resolve);
-        setTimeout(resolve, 3000); // 念のためのタイムアウト
+        setTimeout(resolve, 3000);
       });
 
-      // 3. ボイス切断
       rec.connection.destroy();
       recordings.delete(message.guild.id);
 
@@ -139,7 +155,6 @@ client.on(Events.MessageCreate, async (message) => {
         return replyMsg.edit('❌ 録音された音声がほぼ無音でした。マイクを確認してください');
       }
 
-      // PCM → MP3 変換
       const mp3Path = rec.pcmPath.replace('.pcm', '.mp3');
       await new Promise((resolve, reject) => {
         const ff = spawn(ffmpegStatic, [
@@ -160,7 +175,6 @@ client.on(Events.MessageCreate, async (message) => {
       fs.unlinkSync(rec.pcmPath);
       console.log('MP3変換完了:', mp3Path);
 
-      // Gemini送信
       const buffer = fs.readFileSync(mp3Path);
       const base64Audio = buffer.toString('base64');
       fs.unlinkSync(mp3Path);
