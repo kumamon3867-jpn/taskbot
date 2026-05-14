@@ -33,48 +33,47 @@ client.once(Events.ClientReady, () => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || message.content !== '!task') return;
 
-const voiceChannel = message.member.voice.channel;
-if (!voiceChannel) {
-  return message.reply('ボイスチャンネルに入ってから !task を実行してください');
-}
+  const voiceChannel = message.member?.voice?.channel;
+  if (!voiceChannel) {
+    return message.reply('ボイスチャンネルに入ってから !task を実行してください');
+  }
 
-console.log('Voice channel:', voiceChannel.name);
+  console.log('Voice channel:', voiceChannel.name);
 
-  const replyMsg = await message.reply('🎙️ 15秒間録音します...タスクを話してください！');
+  const replyMsg = await message.reply('🎙️ 音声ファイルを添付してください（60秒以内）');
 
   try {
-    // 簡易版：音声ファイルのアップロードを待つ
     const filter = m => m.author.id === message.author.id && m.attachments.size > 0;
     const collected = await message.channel.awaitMessages({ filter, max: 1, time: 60000, errors: ['time'] });
     const msg = collected.first();
     const attachment = msg.attachments.first();
-    
+
     if (!attachment.name.match(/\.(mp3|wav|m4a|ogg)$/i)) {
       return replyMsg.edit('❌ 音声ファイルを添付してください');
     }
 
     await replyMsg.edit('⏳ 文字起こし & タスク抽出中...');
 
-    // 音声をダウンロード
     const res = await fetch(attachment.url);
     const buffer = Buffer.from(await res.arrayBuffer());
     const base64Audio = buffer.toString('base64');
+    console.log('音声DL完了、サイズ:', buffer.length);
 
-    // Geminiで処理
     const result = await genAI.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: [{
         role: 'user',
         parts: [
           { text: TASK_PROMPT },
-          { inlineData: { mimeType: 'audio/mp3', data: base64Audio } }
+          { inlineData: { mimeType: attachment.contentType || 'audio/mpeg', data: base64Audio } }
         ]
       }]
     });
 
-    const text = result.text;
+    const text = typeof result.text === 'function' ? result.text() : result.text;
+    console.log('Gemini応答:', text?.slice(0, 200));
+
     let taskData;
-    
     try {
       const jsonMatch = text.match(/\{[\s\S]*?\}/);
       taskData = JSON.parse(jsonMatch[0]);
@@ -88,7 +87,6 @@ console.log('Voice channel:', voiceChannel.name);
       };
     }
 
-    // タスクカード作成
     const priorityColors = {
       high: 0xff4444,
       medium: 0xffaa00,
@@ -118,8 +116,25 @@ console.log('Voice channel:', voiceChannel.name);
     await replyMsg.edit('✅ タスクを登録しました！');
 
   } catch (error) {
-    console.error(error);
-    await replyMsg.edit(`❌ エラー: ${error.message}`);
+    console.error('=== ERROR ===');
+    console.error('Status:', error.status);
+    console.error('Message:', error.message);
+    console.error('Full:', error);
+
+    let userMsg = error.message;
+    if (error.status === 429) {
+      userMsg = 'API使用上限です。明日17時(日本時間)にリセットされます';
+    } else if (error.status === 404) {
+      userMsg = 'モデルが見つかりません';
+    } else if (error.message?.includes('time')) {
+      userMsg = '60秒以内にファイル添付がありませんでした';
+    }
+
+    try {
+      await replyMsg.edit(`❌ エラー: ${userMsg}`);
+    } catch (e) {
+      await message.channel.send(`❌ エラー: ${userMsg}`);
+    }
   }
 });
 
